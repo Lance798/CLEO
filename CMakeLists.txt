@@ -7,6 +7,9 @@ cmake_minimum_required(VERSION 3.18.0)
 # cmake_minimum_required(VERSION 3.21.1) ### if using Kokkos with nvc++ compiler on Levante
 
 project(CLEO
+  # note: this version is what find_package(CLEO <version>) checks against, so it needs bumping
+  # alongside the git tag that cog creates (see cog.toml)
+  VERSION 0.69.1
   LANGUAGES CXX C
   DESCRIPTION "Cleo by Clara Bayley and other developers"
 )
@@ -30,6 +33,13 @@ if(NOT CLEO_IS_TOP_LEVEL)
     endif()
   endforeach()
 endif()
+
+# CLEO can install itself so that another project can use find_package(CLEO) instead of building
+# CLEO as a subproject. Off by default when CLEO is itself a subproject, because a parent project's
+# `make install` would otherwise install CLEO alongside the parent.
+include(GNUInstallDirs)
+option(CLEO_ENABLE_INSTALL "Generate install rules and a CLEOConfig.cmake for CLEO" ${CLEO_IS_TOP_LEVEL})
+message(STATUS "CLEO install rules CLEO_ENABLE_INSTALL=${CLEO_ENABLE_INSTALL}")
 
 find_package(MPI REQUIRED COMPONENTS C)
 
@@ -96,6 +106,68 @@ if(CLEO_NO_ROUGHPAPER)
   message(STATUS "CLEO excluding roughpaper CLEO_NO_ROUGHPAPER=${CLEO_NO_ROUGHPAPER}")
 else()
   add_subdirectory(roughpaper EXCLUDE_FROM_ALL)
+endif()
+
+# install rules and package configuration, so that another project can do
+#   find_package(CLEO REQUIRED)
+#   target_link_libraries(myapp PRIVATE CLEO::runcleo CLEO::configuration [...])
+if(CLEO_ENABLE_INSTALL)
+  include(CMakePackageConfigHelpers)
+
+  # collect the CLEO libraries which this particular configuration builds (which coupled dynamics
+  # and which domain are included depends on CLEO_COUPLED_DYNAMICS and CLEO_DOMAIN)
+  set(cleo_known_libraries
+    configuration initialise superdrops collisions gridboxes runcleo zarr observers sdmmonitor
+    cartesiandomain movement coupldyn_fromfile coupldyn_cvode coupldyn_yac)
+  set(cleo_exported_libraries "")
+  foreach(cleo_library ${cleo_known_libraries})
+    if(TARGET ${cleo_library})
+      list(APPEND cleo_exported_libraries ${cleo_library})
+      # several CLEO libraries are added with EXCLUDE_FROM_ALL, which would leave `make install`
+      # with no archive to install for them
+      set_target_properties(${cleo_library} PROPERTIES EXCLUDE_FROM_ALL FALSE)
+    endif()
+  endforeach()
+  message(STATUS "CLEO installing libraries: ${cleo_exported_libraries}")
+
+  install(TARGETS ${cleo_exported_libraries}
+    EXPORT CLEOTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+  # CLEO's headers sit next to its sources and are included relative to libs/, e.g. as
+  # "configuration/config.hpp" or "../cleoconstants.hpp", so that layout is preserved on install
+  install(DIRECTORY ${CLEO_SOURCE_DIR}/libs/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/CLEO
+    FILES_MATCHING
+      PATTERN "*.hpp"
+      PATTERN "cleo_python_bindings" EXCLUDE)
+
+  install(EXPORT CLEOTargets
+    FILE CLEOTargets.cmake
+    NAMESPACE CLEO::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/CLEO)
+
+  # CLEOConfig.cmake needs CLEO's Find modules to re-find YAC for a YAC enabled installation
+  if(CLEO_ENABLE_YAC)
+    install(DIRECTORY ${CLEO_SOURCE_DIR}/libs/coupldyn_yac/cmake/
+      DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/CLEO/modules
+      FILES_MATCHING PATTERN "*.cmake")
+  endif()
+
+  configure_package_config_file(
+    ${CLEO_SOURCE_DIR}/cmake/CLEOConfig.cmake.in
+    ${CLEO_BINARY_DIR}/CLEOConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/CLEO)
+  write_basic_package_version_file(
+    ${CLEO_BINARY_DIR}/CLEOConfigVersion.cmake
+    VERSION ${CLEO_VERSION}
+    COMPATIBILITY SameMinorVersion)
+  install(FILES
+    ${CLEO_BINARY_DIR}/CLEOConfig.cmake
+    ${CLEO_BINARY_DIR}/CLEOConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/CLEO)
 endif()
 
 # CLEO's clean-up targets are only added when CLEO is the top level project: their names are

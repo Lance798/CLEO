@@ -1,0 +1,44 @@
+# Package configuration for CLEO, used by find_package(CLEO).
+#
+# Provides the CLEO::<library> imported targets, e.g.
+#   find_package(CLEO REQUIRED)
+#   target_link_libraries(myapp PRIVATE CLEO::runcleo CLEO::configuration CLEO::cartesiandomain)
+#
+# The include directory is carried by the targets, so no manual include path is needed.
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# CLEO's public interface uses Kokkos, MPI and yaml-cpp (its configuration headers include
+# yaml-cpp headers), so all three have to be available to a consumer of CLEO
+# CLEO may have installed its vendored yaml-cpp into its own prefix, so make sure that prefix is
+# searched even when CLEO itself was located some other way (e.g. via CLEO_ROOT)
+list(APPEND CMAKE_PREFIX_PATH "${PACKAGE_PREFIX_DIR}")
+
+find_dependency(MPI COMPONENTS C)
+find_dependency(Kokkos)
+if(NOT TARGET yaml-cpp::yaml-cpp)
+  find_dependency(yaml-cpp)
+endif()
+
+set(CLEO_ENABLE_YAC @CLEO_ENABLE_YAC@)
+if(CLEO_ENABLE_YAC)
+  # YAC is found with CLEO's own Find modules, installed alongside this file. The paths CLEO was
+  # built against are used as defaults, but a consumer can override them before find_package(CLEO).
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/modules")
+  if(NOT DEFINED YAC_ROOT)
+    set(YAC_ROOT "@CLEO_YAC_ROOT@")
+  endif()
+  if(NOT DEFINED YAXT_ROOT)
+    set(YAXT_ROOT "@CLEO_YAXT_ROOT@")
+  endif()
+  if(NOT DEFINED CLEO_FYAMLLIB)
+    set(CLEO_FYAMLLIB "@CLEO_FYAMLLIB@")
+  endif()
+  find_dependency(YAC)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/CLEOTargets.cmake")
+
+check_required_components(CLEO)
