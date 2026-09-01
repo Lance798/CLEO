@@ -8,7 +8,7 @@ set(LIBNAME "superdrops")
 message(STATUS "CLEO using ${LIBNAME} with LIBRARY_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
 
 # explicitly set library executables path to /lib in top level of build tree
-set(LIB_BINARY_DIR ${CMAKE_BINARY_DIR}/lib)
+set(LIB_BINARY_DIR ${CLEO_BINARY_DIR}/lib)
 
 # Add executables and create library target
 set(SOURCES

@@ -11,6 +11,26 @@ project(CLEO
   DESCRIPTION "Cleo by Clara Bayley and other developers"
 )
 
+# CLEO may be consumed as a subproject (e.g. via add_subdirectory or FetchContent). Detect that
+# here so CLEO can avoid polluting a parent project with its targets and its optional components.
+# (equivalent to PROJECT_IS_TOP_LEVEL, which requires cmake 3.21 whereas CLEO requires only 3.18)
+if(CMAKE_SOURCE_DIR STREQUAL CLEO_SOURCE_DIR)
+  set(CLEO_IS_TOP_LEVEL ON)
+else()
+  set(CLEO_IS_TOP_LEVEL OFF)
+endif()
+message(STATUS "CLEO is the top level project: ${CLEO_IS_TOP_LEVEL}")
+
+# as a subproject CLEO's optional components are off by default (the python bindings in particular
+# fetch pybind11 at configure time), but an explicit -DCLEO_NO_<X> from the parent still wins
+if(NOT CLEO_IS_TOP_LEVEL)
+  foreach(cleo_optional_component CLEO_NO_EXAMPLES CLEO_NO_ROUGHPAPER CLEO_NO_PYBINDINGS)
+    if(NOT DEFINED ${cleo_optional_component})
+      set(${cleo_optional_component} ON)
+    endif()
+  endforeach()
+endif()
+
 find_package(MPI REQUIRED COMPONENTS C)
 
 message(STATUS "CLEO source from CLEO_SOURCE_DIR: ${CLEO_SOURCE_DIR}")
@@ -34,10 +54,15 @@ else()
   message(FATAL_ERROR "Couldn't find Kokkos." )
 endif()
 
-# install yaml-cpp for project
-set(yamlcpppath ${CLEO_SOURCE_DIR}/extern/yaml-cpp)
-message(STATUS "Using yaml-cpp installation from: ${yamlcpppath}")
-add_subdirectory(${yamlcpppath} ${CLEO_BINARY_DIR}/yaml-cpp)
+# install yaml-cpp for project, unless a parent project already provides it (fetching it twice
+# would be a duplicate target error)
+if(TARGET yaml-cpp::yaml-cpp OR TARGET yaml-cpp)
+  message(STATUS "Using yaml-cpp target already provided by the parent project")
+else()
+  set(yamlcpppath ${CLEO_SOURCE_DIR}/extern/yaml-cpp)
+  message(STATUS "Using yaml-cpp installation from: ${yamlcpppath}")
+  add_subdirectory(${yamlcpppath} ${CLEO_BINARY_DIR}/yaml-cpp)
+endif()
 
 # YAC is an optional dependency of CLEO. It is mandatory for CLEO's YAC coupled dynamics, but
 # otherwise CLEO is built without it (a config file requesting YAC dynamics is then rejected
@@ -67,6 +92,10 @@ if(CLEO_NO_ROUGHPAPER)
 else()
   add_subdirectory(roughpaper EXCLUDE_FROM_ALL)
 endif()
+
+# CLEO's clean-up targets are only added when CLEO is the top level project: their names are
+# global, so as a subproject they would collide with a parent project's own targets
+if(CLEO_IS_TOP_LEVEL)
 
 # "make distclean" / "make dist-clean" target to perform `make clean`
 # and then remove generated build files and third-party build dirs
@@ -106,3 +135,5 @@ add_custom_target(wipeclean
 add_custom_target("wipe-clean"
   COMMAND ${CMAKE_COMMAND} --build "${CLEO_BINARY_DIR}" --target wipeclean
 )
+
+endif()
