@@ -52,8 +52,10 @@ On Levante it's best to use version 3.26.3 which can be loaded e.g. for gcc 11.2
 YAC
 ---
 
-YAC is one of the external libraries which Cleo requires for its configuration
-library (for MPI domain decomposition with/without YAC) and in order to couple to dynamics via YAC.
+YAC is an optional external library which Cleo uses in order to couple to dynamics via YAC.
+It is only required if you build Cleo with ``-DCLEO_COUPLED_DYNAMICS=yac`` (or ``=all``), or if you
+explicitly request YAC support with ``-DCLEO_ENABLE_YAC=ON``. Otherwise Cleo builds without YAC
+(and without YAXT), and a config file which requests YAC coupled dynamics is rejected at runtime.
 
 YAC (and its YAXT dependency) need to be installed manually before you can build Cleo with them.
 Please refer to the instructions on how to do install YAC (and YAXT) in our

@@ -39,6 +39,15 @@ set(yamlcpppath ${CLEO_SOURCE_DIR}/extern/yaml-cpp)
 message(STATUS "Using yaml-cpp installation from: ${yamlcpppath}")
 add_subdirectory(${yamlcpppath} ${CLEO_BINARY_DIR}/yaml-cpp)
 
+# YAC is an optional dependency of CLEO. It is mandatory for CLEO's YAC coupled dynamics, but
+# otherwise CLEO is built without it (a config file requesting YAC dynamics is then rejected
+# at runtime). Set -DCLEO_ENABLE_YAC=ON to build YAC support in regardless of the coupled dynamics.
+option(CLEO_ENABLE_YAC "Build CLEO with YAC support (requires CLEO_YAC_ROOT and CLEO_YAXT_ROOT)" OFF)
+if("${CLEO_COUPLED_DYNAMICS}" STREQUAL "yac" OR "${CLEO_COUPLED_DYNAMICS}" STREQUAL "all")
+  set(CLEO_ENABLE_YAC ON) # YAC is mandatory for these coupled dynamics
+endif()
+message(STATUS "CLEO with YAC support CLEO_ENABLE_YAC=${CLEO_ENABLE_YAC}")
+
 # print default compiler flags
 message(STATUS "CLEO primary CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 

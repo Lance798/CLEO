@@ -19,9 +19,13 @@
 
 #include "configuration/communicator.hpp"
 
+#include <stdexcept>
+
+#ifdef CLEO_ENABLE_YAC
 extern "C" {
 #include "yac.h"
 }
+#endif
 
 int init_communicator::yac_comp_id = -1;
 MPI_Comm init_communicator::comm = NULL;
@@ -30,6 +34,7 @@ int init_communicator::my_rank = -1;
 
 init_communicator::init_communicator(int argc, char* argv[], const Config& config) {
   if (!(std::isnan(config.get_yac_dynamics().lower_longitude))) {
+#ifdef CLEO_ENABLE_YAC
     std::cout << "yac is present\n";
     // -- YAC initialization and calendar definitions ---
     yac_cinit();
@@ -40,6 +45,11 @@ init_communicator::init_communicator(int argc, char* argv[], const Config& confi
     yac_present = true;
     MPI_Comm_size(comm, &init_communicator::comm_size);
     MPI_Comm_rank(comm, &my_rank);
+#else
+    throw std::runtime_error(
+        "the configuration file requests YAC but CLEO was built without YAC support. Please "
+        "rebuild CLEO with -DCLEO_ENABLE_YAC=ON (and CLEO_YAC_ROOT, CLEO_YAXT_ROOT set)");
+#endif
   } else {
     std::cout << "yac is not present " << yac_present << "\n";
 

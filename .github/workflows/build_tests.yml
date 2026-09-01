@@ -110,8 +110,8 @@ jobs:
         run: cd build && make ${{ matrix.target }}
 
   parallelisation_execution_test:
+    # note: this job deliberately builds without YAC to test CLEO's optional YAC dependency
     runs-on: ubuntu-latest
-    needs: setup
     strategy:
       matrix:
         target: [fromfile, fromfile_irreg]
@@ -128,18 +128,6 @@ jobs:
           python3-dev python3-numpy python3-mpi4py python3-pip curl
           apt list --installed
 
-      - name: Restore YAXT Cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/yaxt/
-          key: ${{ runner.os }}-yaxt-cache-v0.12.1
-
-      - name: Restore YAC Cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/yac/
-          key: ${{ runner.os }}-yac-cache-v3.20.2
-
       - name: Build Parallel Execution Test
         run: |
           mkdir build
@@ -149,11 +137,7 @@ jobs:
           -DCMAKE_CXX_FLAGS="-Werror -Wall -pedantic -O3" \
           -DKokkos_ENABLE_SERIAL=ON \
           -DCLEO_COUPLED_DYNAMICS=fromfile \
-          -DCLEO_DOMAIN=cartesian \
-          -DCLEO_FYAMLLIB=/usr/lib/x86_64-linux-gnu \
-          -DCLEO_YAXT_ROOT=${{ runner.temp }}/yaxt \
-          -DCLEO_YAC_ROOT=${{ runner.temp }}/yac \
-          -DCMAKE_MODULE_PATH=${PWD}/libs/coupldyn_yac/cmake
+          -DCLEO_DOMAIN=cartesian
 
       - name: Compile Parallel Execution Test
         run: cd build && make ${{ matrix.target }}

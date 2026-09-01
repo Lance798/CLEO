@@ -10,21 +10,24 @@ message(STATUS "CLEO using ${LIBNAME} with LIBRARY_SOURCE_DIR: ${CMAKE_CURRENT_S
 # explicitly set library executables path to /lib in top level of build tree
 set(LIB_BINARY_DIR ${CMAKE_BINARY_DIR}/lib)
 
-## TODO(ALL): make YAC optional (not required) dependency
-# ----- # if("${CLEO_COUPLED_DYNAMICS}" STREQUAL "yac" OR "${CLEO_COUPLED_DYNAMICS}" STREQUAL "all")
 enable_language(C)
 message(STATUS "CLEO ${LIBNAME} enabling C language")
 
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CLEO_YAC_MODULE_PATH})
-message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
-message(STATUS "Using YAC pre-installed in: ${CLEO_YAC_ROOT}")
-message(STATUS "Using YAXT pre-installed in: ${CLEO_YAXT_ROOT}")
-set(YAC_ROOT ${CLEO_YAC_ROOT})
-set(YAXT_ROOT ${CLEO_YAXT_ROOT})
-# require MPI and YAC explicitly for this library
+# require MPI explicitly for this library
 find_package(MPI REQUIRED COMPONENTS C)
-find_package(YAC REQUIRED)
-# ----- # endif()
+
+# YAC is an optional dependency of this library, see CLEO_ENABLE_YAC in the top level CMakeLists.txt
+if(CLEO_ENABLE_YAC)
+  set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CLEO_YAC_MODULE_PATH})
+  message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+  message(STATUS "Using YAC pre-installed in: ${CLEO_YAC_ROOT}")
+  message(STATUS "Using YAXT pre-installed in: ${CLEO_YAXT_ROOT}")
+  set(YAC_ROOT ${CLEO_YAC_ROOT})
+  set(YAXT_ROOT ${CLEO_YAXT_ROOT})
+  find_package(YAC REQUIRED)
+else()
+  message(STATUS "CLEO ${LIBNAME} building without YAC (CLEO_ENABLE_YAC=${CLEO_ENABLE_YAC})")
+endif()
 
 # Add executables and create library target
 set(SOURCES
@@ -38,12 +41,17 @@ add_library("${LIBNAME}" STATIC ${SOURCES})
 
 # Add directories for target library
 #target_include_directories("${LIBNAME}"" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_include_directories(${LIBNAME} PRIVATE ${YAC_C_INCLUDE_DIR}) # YAC source directory
 target_include_directories("${LIBNAME}" PRIVATE "${CLEO_SOURCE_DIR}/libs" ${MPI_INCLUDE_PATH})
 
 # Link libraries to target library
 target_link_libraries(${LIBNAME} PUBLIC Kokkos::kokkos yaml-cpp::yaml-cpp MPI::MPI_C)
-target_link_libraries(${LIBNAME} PRIVATE YAC::YAC)
+
+# Add YAC to target library (only if CLEO is built with YAC support)
+if(CLEO_ENABLE_YAC)
+  target_include_directories(${LIBNAME} PRIVATE ${YAC_C_INCLUDE_DIR}) # YAC source directory
+  target_compile_definitions(${LIBNAME} PUBLIC CLEO_ENABLE_YAC)
+  target_link_libraries(${LIBNAME} PRIVATE YAC::YAC)
+endif()
 
 # set specific C++ compiler options for target (optional)
 #target_compile_options("${LIBNAME}" PRIVATE)
