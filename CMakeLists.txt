@@ -56,8 +56,13 @@ endif()
 
 # install yaml-cpp for project, unless a parent project already provides it (fetching it twice
 # would be a duplicate target error)
-if(TARGET yaml-cpp::yaml-cpp OR TARGET yaml-cpp)
+if(TARGET yaml-cpp::yaml-cpp)
   message(STATUS "Using yaml-cpp target already provided by the parent project")
+elseif(TARGET yaml-cpp)
+  # some parent projects (e.g. EKAT) provide only the unqualified target, but CLEO links the
+  # namespaced one, so alias it here
+  message(STATUS "Using unqualified yaml-cpp target already provided by the parent project")
+  add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
 else()
   set(yamlcpppath ${CLEO_SOURCE_DIR}/extern/yaml-cpp)
   message(STATUS "Using yaml-cpp installation from: ${yamlcpppath}")
