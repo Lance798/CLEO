@@ -27,10 +27,12 @@ set(CMAKE_CXX_STANDARD "20")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CXX_EXTENSIONS ON)
 
-# install Kokkos for project
-set(kokkospath ${CLEO_SOURCE_DIR}/extern/kokkos)
-message(STATUS "Using Kokkos installation from: ${kokkospath}")
-add_subdirectory(${kokkospath} ${CLEO_BINARY_DIR}/kokkos)
+find_package(Kokkos CONFIG)
+if(Kokkos_FOUND)
+  message(STATUS "Found Kokkos: ${Kokkos_DIR} (version \"${Kokkos_VERSION}\")")
+else()
+  message(FATAL_ERROR "Couldn't find Kokkos." )
+endif()
 
 # install yaml-cpp for project
 set(yamlcpppath ${CLEO_SOURCE_DIR}/extern/yaml-cpp)
