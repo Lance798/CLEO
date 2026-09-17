@@ -33,7 +33,7 @@ SupersInDomain CartesianTransportAcrossDomain::operator()(const CartesianMaps& g
   if (comm_size > 1) {
     // TODO(ALL): combine two sorts into one(?)
     auto totsupers = allsupers.sort_totsupers_without_set(d_gbxs);
-    totsupers = sendrecv_supers(gbxmaps, d_gbxs, totsupers);
+    totsupers = sendrecv_supers(gbxmaps, d_gbxs, totsupers, host_buffer);
     allsupers.sort_and_set_totsupers(totsupers, d_gbxs);
   } else {
     allsupers.sort_totsupers(d_gbxs);

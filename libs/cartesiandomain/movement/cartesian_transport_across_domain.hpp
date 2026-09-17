@@ -21,6 +21,7 @@
 #define LIBS_CARTESIANDOMAIN_MOVEMENT_CARTESIAN_TRANSPORT_ACROSS_DOMAIN_HPP_
 
 #include <Kokkos_Core.hpp>
+#include <algorithm>
 #include <array>
 #include <concepts>
 #include <cstdint>
@@ -45,13 +46,28 @@ which move to/from gridboxes on different nodes.
 */
 template <GridboxMaps GbxMaps>
 viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
-                             viewd_supers totsupers);
+                             viewd_supers totsupers,
+                             Kokkos::View<Superdrop*, HostSpace>& host_buffer);
 
 /*
  * struct satisfying TransportAcrossDomain concept for transporting superdroplets around a
  * cartesian domain, optionally with MPI communicaiton of superdroplets between nodes
  */
 struct CartesianTransportAcrossDomain {
+  /* Staging buffer for the MPI exchange, allocated once and reused.
+
+  The exchange used to build a host mirror of the whole superdroplet view and
+  allocate a fresh device view to return, on every motion step. That view is the
+  GLOBAL superdroplet count on every rank, so at 21 M superdroplets it was 1.34 GB
+  each way per step through the pageable path at under 4 GB/s, plus a 1.34 GB
+  allocation whose value-init default-constructs 21 M Superdrops that are then
+  immediately overwritten.
+
+  A member rather than a function-local static: a Kokkos View in a static is
+  destroyed after Kokkos::finalize has run, and Kokkos aborts on that. mutable
+  because operator() is const. */
+  mutable Kokkos::View<Superdrop*, HostSpace> host_buffer;
+
   /* (re)sorting supers based on their gbxindexes as step to 'move' superdroplets across the domain.
   May also include MPI communication with moves superdroplets away from/into a node's domain
   */
@@ -63,10 +79,49 @@ struct CartesianTransportAcrossDomain {
 function to move super-droplets between MPI processes, e.g. for superdroplets
 which move to/from gridboxes on different nodes.
 */
+namespace sendrecv_detail {
+
+/* One past the last slot holding a superdroplet, i.e. an upper bound on the part
+of the view the exchange has to look at. Everything above it is oob_gbxindex and
+stays that way, so it need not be copied to the host, scanned, or copied back.
+
+A max-reduction rather than a count so this stays correct if the view ever arrives
+unsorted -- it is sorted by sdgbxindex today, which puts oob_gbxindex (UINT_MAX)
+last, but nothing here would notice if that changed. */
+inline size_t occupied_slots(const viewd_supers totsupers) {
+  size_t n = 0;
+  Kokkos::parallel_reduce(
+      "occupied_slots", Kokkos::RangePolicy<ExecSpace>(0, totsupers.extent(0)),
+      KOKKOS_LAMBDA(const size_t kk, size_t& acc) {
+        if (totsupers(kk).get_sdgbxindex() != LIMITVALUES::oob_gbxindex) {
+          acc = (kk + 1 > acc) ? kk + 1 : acc;
+        }
+      },
+      Kokkos::Max<size_t>(n));
+  return n;
+}
+
+}  // namespace sendrecv_detail
+
 template <GridboxMaps GbxMaps>
 viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
-                             viewd_supers totsupers_cuda) {
-  auto totsupers = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), totsupers_cuda);
+                             viewd_supers totsupers_cuda,
+                             Kokkos::View<Superdrop*, HostSpace>& host_buffer) {
+  const auto capacity = totsupers_cuda.extent(0);
+  const auto n_occupied = sendrecv_detail::occupied_slots(totsupers_cuda);
+
+  /* Buffer is the full capacity so the bounds checks below still compare against
+  the space actually available, but only the occupied prefix is moved. */
+  if (host_buffer.extent(0) < capacity) {
+    Kokkos::realloc(Kokkos::WithoutInitializing, host_buffer, capacity);
+  }
+  auto totsupers = Kokkos::subview(host_buffer, Kokkos::make_pair(size_t{0}, capacity));
+  if (n_occupied > 0) {
+    const auto prefix = Kokkos::make_pair(size_t{0}, n_occupied);
+    Kokkos::deep_copy(Kokkos::subview(totsupers, prefix),
+                      Kokkos::subview(totsupers_cuda, prefix));
+  }
+
   int comm_size, my_rank;
   comm_size = init_communicator::get_comm_size();
   my_rank = init_communicator::get_comm_rank();
@@ -94,8 +149,14 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
   size_t total_superdrops_to_send = 0;
   size_t total_superdrops_to_recv = 0;
   size_t local_superdrops = 0;
-  size_t superdrop_index = totsupers.extent(0) - 1;
-  Superdrop& drop = totsupers(superdrop_index);
+  size_t superdrop_index = (n_occupied > 0) ? n_occupied - 1 : 0;
+  /* A copy, not a reference. `drop = totsupers(--superdrop_index)` assigns THROUGH
+  a reference, so a `Superdrop&` here silently overwrites the slot it was bound to
+  with each superdroplet the scan walks past. That was harmless while the scan
+  started at the end of the view -- the slot held no superdroplet and was reset to
+  oob_gbxindex anyway -- but the scan now starts at the last occupied slot, and
+  clobbering that one loses a superdroplet per step and sends the wrong one. */
+  Superdrop drop = totsupers(superdrop_index);
 
   /* Go through superdrops from back to front and find how many should be sent and
   their indices.
@@ -108,7 +169,7 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
   per_process_send_superdrops[]. The symptom is a livelock with jemalloc churn and
   caught SIGSEGVs, nowhere near the actual cause. */
   const auto ngbxs = d_gbxs.extent(0);
-  while (drop.get_sdgbxindex() >= ngbxs) {
+  while (n_occupied > 0 && drop.get_sdgbxindex() >= ngbxs) {
     if (drop.get_sdgbxindex() < LIMITVALUES::oob_gbxindex) {
       int target_process = (LIMITVALUES::oob_gbxindex - drop.get_sdgbxindex()) - 1;
       if (target_process < 0 || target_process >= comm_size) {
@@ -128,7 +189,9 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
     }
     drop = totsupers(--superdrop_index);
   }
-  if (superdrop_index != 0 || drop.get_sdgbxindex() < ngbxs) local_superdrops = superdrop_index + 1;
+  if (n_occupied > 0 && (superdrop_index != 0 || drop.get_sdgbxindex() < ngbxs)) {
+    local_superdrops = superdrop_index + 1;
+  }
 
   // Share how many superdrops each process will send and receive to/from the others
   MPI_Alltoall(per_process_send_superdrops.data(), 1, MPI_INT, per_process_recv_superdrops.data(),
@@ -141,9 +204,12 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
   }
   if (local_superdrops + total_superdrops_to_recv > totsupers.extent(0)) {
     std::cout << "MAXIMUM NUMBER OF LOCAL SUPERDROPLETS EXCEEDED" << std::endl;
-    viewd_supers device_supers("device_supers_name", totsupers.extent(0));
-    Kokkos::deep_copy(device_supers, totsupers);
-    return device_supers;
+    if (n_occupied > 0) {
+      const auto prefix = Kokkos::make_pair(size_t{0}, n_occupied);
+      Kokkos::deep_copy(Kokkos::subview(totsupers_cuda, prefix),
+                        Kokkos::subview(totsupers, prefix));
+    }
+    return totsupers_cuda;
   }
 
   // Knowing how many superdroplets will be sent and received, allocate
@@ -254,13 +320,25 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
     totsupers(i).set_sdgbxindex(gbxindex);
   }
 
-  // Reset all remaining non-used superdroplet spots
-  for (unsigned int i = local_superdrops + total_superdrops_to_recv; i < totsupers.extent(0); i++)
+  /* Reset the slots that held superdroplets which have now been sent away. Only up
+  to n_occupied: everything above it was already oob_gbxindex on entry and was never
+  copied to the host, so walking to the end of the view would just re-write a value
+  that is already there -- millions of slots of it. */
+  for (size_t i = local_superdrops + total_superdrops_to_recv; i < n_occupied; i++)
     totsupers(i).set_sdgbxindex(LIMITVALUES::oob_gbxindex);
 
-  viewd_supers device_supers("device_supers_name", totsupers.extent(0));
-  Kokkos::deep_copy(device_supers, totsupers);
-  return device_supers;
+  /* Written back in place, and only as far as either side was touched: the slots
+  above that are oob_gbxindex on the device already. Returning a freshly allocated
+  view instead cost a full-size allocation, its value-init, and a full-size copy on
+  every step. */
+  const auto n_written =
+      std::max(n_occupied, static_cast<size_t>(local_superdrops + total_superdrops_to_recv));
+  if (n_written > 0) {
+    const auto touched = Kokkos::make_pair(size_t{0}, n_written);
+    Kokkos::deep_copy(Kokkos::subview(totsupers_cuda, touched),
+                      Kokkos::subview(totsupers, touched));
+  }
+  return totsupers_cuda;
 }
 
 #endif  // LIBS_CARTESIANDOMAIN_MOVEMENT_CARTESIAN_TRANSPORT_ACROSS_DOMAIN_HPP_
