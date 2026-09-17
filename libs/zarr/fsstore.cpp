@@ -37,9 +37,13 @@ bool FSStore::write(std::string_view key, std::span<const uint8_t> buffer) const
   std::ofstream out(path, mode);
 
   if (!out.good()) {
-    std::cout << "couldn't open " << path << ",\n " << "making directory " << path.parent_path()
-              << "\n";
-    std::filesystem::create_directories(path.parent_path());
+    /* The error_code overload, not the throwing one: with more than one rank
+    every process creates the same array directories, and whichever loses the
+    race between the failed open and create_directories used to abort the run
+    with "cannot create directories: File exists". Another rank having made it
+    already is the success case here, so ignore ec and just retry the open. */
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
     out.open(path, mode);
   }
 

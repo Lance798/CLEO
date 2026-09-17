@@ -196,6 +196,20 @@ class CollectiveDataset {
   }
 
   /**
+   * @brief Wrapper for MPI gatherv call for a double array
+   *
+   * Needed by the SDM monitor observers, whose datatype is double
+   * (MonitorPrecipitation, MonitorCondensation, the massmoments-change
+   * monitors). Without it CollectiveDataset does not compile for any
+   * configuration that enables them.
+   */
+  void collect_global_array(double* target, double* local_source, int local_size,
+                            int* receive_counts, int* receive_displacements) const {
+    MPI_Gatherv(local_source, local_size, MPI_DOUBLE, target, receive_counts,
+                receive_displacements, MPI_DOUBLE, 0, comm);
+  }
+
+  /**
    * @brief Adds a dimension to the dataset.
    *
    * @param dim A pair containing the name and size of the dimension to be added.
@@ -211,6 +225,53 @@ class CollectiveDataset {
                                  distributed_datasetdims.at(dim.first).end(), 0);
 
     datasetdims.insert({dim.first, dim_size});
+  }
+
+  /**
+   * @brief Widens a chunkshape's inner dimensions to the dataset's global size.
+   *
+   * ZarrArray fills one linear buffer and names each chunk from a running counter
+   * (Chunks::chunk_label), which only puts a chunk where its label says when every
+   * chunk spans a whole row of the array -- i.e. when there is exactly one chunk
+   * along all but the outermost dimension. Otherwise a chunk is a strided window of
+   * the C-ordered stream, not a contiguous run of it.
+   *
+   * Observers size their chunks from the gridbox count of the rank that builds them,
+   * so under MPI that inner size is the local count while the array itself is the
+   * global one. That splits the inner dimension into comm_size chunks and the counter
+   * then lays successive (rank, timestep) buffers down end to end: the file contents
+   * are the whole array in C order, but every chunk boundary in the metadata is a
+   * lie, and a reader decoding them interleaves ranks with timesteps.
+   *
+   * Widening the inner dimensions back to the global size restores the one-chunk-per-
+   * row invariant the writer assumes. Only rank 0 writes, and only rank 0 accumulates
+   * the global sizes into datasetdims, which is exactly where this needs to be right.
+   *
+   * @param chunkshape The chunkshape an observer asked for.
+   * @param dimnames The name of each dimension of the array.
+   * @return The chunkshape to actually give the array.
+   */
+  std::vector<size_t> collective_chunkshape(const std::vector<size_t>& chunkshape,
+                                            const std::vector<std::string>& dimnames) const {
+    if (chunkshape.size() < 2 || chunkshape.size() != dimnames.size()) return chunkshape;
+    auto shape = chunkshape;
+    for (size_t aa = 1; aa < shape.size(); ++aa) {
+      const auto dim = datasetdims.find(dimnames.at(aa));
+      if (dim != datasetdims.end() && dim->second > shape.at(aa)) shape.at(aa) = dim->second;
+    }
+
+    /* Widening multiplied the chunk's volume by roughly the number of ranks, so take
+    that factor back off the outermost dimension. maxchunk is a budget the caller set,
+    and without this a chunk grows with the rank count -- eight ranks would each write
+    chunks eight times the size asked for. Using the volume ratio rather than a
+    per-dimension one keeps this right when ranks own uneven shares of the domain. */
+    const auto asked = vec_product(chunkshape, 1);
+    const auto widened = vec_product(shape, 1);
+    if (widened > asked && asked > 0) {
+      const auto shape0 = shape.at(0) * asked / widened;
+      shape.at(0) = (shape0 > 0) ? shape0 : 1;
+    }
+    return shape;
   }
 
  public:
@@ -292,7 +353,7 @@ class CollectiveDataset {
                                          const std::vector<size_t>& chunkshape,
                                          const std::vector<std::string>& dimnames) const {
     return XarrayZarrArray<Store, T>(group.store, datasetdims, name, units, scale_factor,
-                                     chunkshape, dimnames);
+                                     collective_chunkshape(chunkshape, dimnames), dimnames);
   }
 
   /**
