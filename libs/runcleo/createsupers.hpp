@@ -25,7 +25,9 @@
 #include <stdexcept>
 #include <string>
 
+#include "../cleoconstants.hpp"
 #include "../kokkosaliases.hpp"
+#include "gridboxes/gridboxmaps.hpp"
 #include "gridboxes/supersindomain.hpp"
 #include "runcleo/gensuperdrop.hpp"
 
@@ -42,6 +44,46 @@
  */
 template <typename SuperdropInitConds>
 viewd_supers initialise_supers(const SuperdropInitConds& sdic);
+
+/**
+ * @brief Rewrite each superdroplet's gridbox index from global to rank-local.
+ *
+ * The initial conditions describe the whole domain and number gridboxes
+ * globally, and every rank reads the same file. Without this step a rank keeps
+ * whichever superdroplets happen to have a global index below its LOCAL gridbox
+ * count -- with two ranks that is the same first half of the domain on both, so
+ * one rank holds droplets it does not own and the other is missing its own.
+ * Nothing downstream detects it: sdgbxindex values above the local count look
+ * exactly like "this droplet belongs to another rank", so sendrecv_supers
+ * decodes a target process from a global gridbox index and gets nonsense.
+ *
+ * Droplets this rank does not own are marked out of bounds; SupersInDomain then
+ * sorts them to the tail of the view, where they cost nothing but the space.
+ * For a single rank global and local indexes coincide and this is the identity.
+ */
+template <GridboxMaps GbxMaps>
+void localise_sdgbxindexes(const viewd_supers totsupers, const GbxMaps& gbxmaps) {
+  const auto& decomposition = gbxmaps.get_domain_decomposition();
+  auto h_totsupers = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), totsupers);
+
+  size_t local = 0;
+  for (size_t kk = 0; kk < h_totsupers.extent(0); ++kk) {
+    const auto global_index = h_totsupers(kk).get_sdgbxindex();
+    if (global_index == LIMITVALUES::oob_gbxindex) continue;
+
+    const auto local_index = decomposition.global_to_local_gridbox_index(global_index);
+    if (local_index < 0) {
+      h_totsupers(kk).set_sdgbxindex(LIMITVALUES::oob_gbxindex);
+    } else {
+      h_totsupers(kk).set_sdgbxindex(static_cast<unsigned int>(local_index));
+      ++local;
+    }
+  }
+
+  Kokkos::deep_copy(totsupers, h_totsupers);
+  std::cout << "localised " << local << " of " << h_totsupers.extent(0)
+            << " superdroplets onto this rank\n";
+}
 
 /**
  * @brief Return a mirror view of superdrops on host memory.
@@ -132,6 +174,39 @@ SupersInDomain create_supers(const SuperdropInitConds& sdic, const unsigned int 
 #endif
 
   // Log message indicating the successful creation of superdrops
+  std::cout << "--- create superdrops: success ---\n";
+
+  return allsupers;
+}
+
+/**
+ * @brief As above, but taking the gridbox maps so the superdroplets' gridbox
+ * indexes can be converted from the global numbering used by the initial
+ * conditions to this rank's local one first.
+ *
+ * Use this whenever the run may be decomposed across more than one rank; the
+ * overload taking a bare gbxindex_max cannot tell a global index apart from a
+ * local one and silently keeps the wrong droplets. See localise_sdgbxindexes.
+ */
+template <typename SuperdropInitConds, GridboxMaps GbxMaps>
+SupersInDomain create_supers(const SuperdropInitConds& sdic, const GbxMaps& gbxmaps) {
+  Kokkos::Profiling::ScopedRegion region("init_supers");
+
+  std::cout << "\n--- create superdrops ---\ninitialising\n";
+  auto totsupers = initialise_supers(sdic);
+
+  std::cout << "localising superdrop gridbox indexes\n";
+  localise_sdgbxindexes(totsupers, gbxmaps);
+
+  std::cout << "sorting and finding superdrops in domain\n";
+  auto allsupers = SupersInDomain(totsupers, gbxmaps.get_local_ngridboxes_hostcopy());
+
+#ifndef NDEBUG
+  std::cout << "checking initialisation\n";
+  is_sdsinit_complete(allsupers);
+  print_supers(totsupers);
+#endif
+
   std::cout << "--- create superdrops: success ---\n";
 
   return allsupers;
