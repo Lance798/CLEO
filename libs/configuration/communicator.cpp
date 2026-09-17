@@ -13,8 +13,8 @@
  * https://opensource.org/licenses/BSD-3-Clause
  * -----
  * File Description:
- * Functionality for members of Config struct which determine CLEO's required configuration
- * parameters read from a config file.
+ * Functionality for members of Config struct which determine CLEO's required
+ * configuration parameters read from a config file.
  */
 
 #include "configuration/communicator.hpp"
@@ -32,7 +32,8 @@ MPI_Comm init_communicator::comm = NULL;
 int init_communicator::comm_size = -1;
 int init_communicator::my_rank = -1;
 
-init_communicator::init_communicator(int argc, char* argv[], const Config& config) {
+init_communicator::init_communicator(int argc, char *argv[],
+                                     const Config &config) {
   if (!(std::isnan(config.get_yac_dynamics().lower_longitude))) {
 #ifdef CLEO_ENABLE_YAC
     std::cout << "yac is present\n";
@@ -46,9 +47,10 @@ init_communicator::init_communicator(int argc, char* argv[], const Config& confi
     MPI_Comm_size(comm, &init_communicator::comm_size);
     MPI_Comm_rank(comm, &my_rank);
 #else
-    throw std::runtime_error(
-        "the configuration file requests YAC but CLEO was built without YAC support. Please "
-        "rebuild CLEO with -DCLEO_ENABLE_YAC=ON (and CLEO_YAC_ROOT, CLEO_YAXT_ROOT set)");
+    throw std::runtime_error("the configuration file requests YAC but CLEO was "
+                             "built without YAC support. Please "
+                             "rebuild CLEO with -DCLEO_ENABLE_YAC=ON (and "
+                             "CLEO_YAC_ROOT, CLEO_YAXT_ROOT set)");
 #endif
   } else {
     std::cout << "yac is not present " << yac_present << "\n";
@@ -61,7 +63,7 @@ init_communicator::init_communicator(int argc, char* argv[], const Config& confi
     }
     std::cout << "MPI initialized " << mpi_initialized << "\n";
 
-    comm = MPI_COMM_WORLD;
+    comm = init_communicator::get_communicator();
     MPI_Comm_size(comm, &comm_size);
     MPI_Comm_rank(comm, &my_rank);
     yac_present = false;
@@ -77,9 +79,16 @@ init_communicator::~init_communicator() {
   }
 };
 
+void init_communicator::set_communicator(MPI_Comm communicator) {
+  init_communicator::comm = communicator;
+  MPI_Comm_size(init_communicator::comm, &init_communicator::comm_size);
+  MPI_Comm_rank(init_communicator::comm, &init_communicator::my_rank);
+};
+
 MPI_Comm init_communicator::get_communicator() {
   if (init_communicator::comm == MPI_COMM_NULL) {
-    std::cout << "Communicator not initialized, calling MPI Abort!" << std::endl;
+    std::cout << "Communicator not initialized, calling MPI Abort!"
+              << std::endl;
     MPI_Abort(comm, 1);
   }
   return comm;
