@@ -20,6 +20,7 @@
 #ifndef LIBS_INITIALISE_READBINARY_HPP_
 #define LIBS_INITIALISE_READBINARY_HPP_
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <ios>
@@ -33,7 +34,7 @@
 start of binary (used to declare layout of binary file)
 as well as string describing data in file */
 struct GblMetadata {
-  unsigned int d0byte;         // position of first byte of data
+  uint64_t d0byte;             // position of first byte of data (see note on VarMetadata::b0)
   unsigned int charbytes;      // no. bytes of global metadata chars (in string)
   unsigned int nvars;          // no. variables in file
   unsigned int mbytes_pervar;  //  no. bytes of metadata per variable
@@ -47,7 +48,17 @@ struct GblMetadata {
 /* metadata in file related to a
 particular variable (vaR) in that file */
 struct VarMetadata {
-  unsigned int b0;      // first byte in file containing this var's data
+  /* First byte in the file containing this var's data.
+  Held in 64 bits, and NOT the value stored in the file: the format writes this
+  offset as a 32-bit unsigned int, so in a file larger than 4 GiB every variable
+  past that point has a wrapped offset -- pointing back into an earlier
+  variable's data. Nothing detects it; the file is the right length and the data
+  reads back as plausible numbers of the wrong quantity. metadata_from_binary
+  therefore derives the offsets by accumulating bsize * nvar from d0byte, which
+  the writer guarantees is correct because it lays the variables out
+  contiguously in order, and cross-checks the result against what the file
+  claims. */
+  uint64_t b0;
   unsigned int bsize;   // size in bytes of 1 datapoint of this var
   unsigned int nvar;    // no. datapoints of this var
   char vtype;           // char indicating type of this var
@@ -84,7 +95,7 @@ one variable in a binary file given that variable's
 metadata is given by the VarMetadata instance, 'varmeta' */
 template <typename T>
 std::vector<T> vector_from_binary(std::ifstream& file, const VarMetadata& varmeta) {
-  file.seekg(varmeta.b0, std::ios::beg);
+  file.seekg(static_cast<std::streamoff>(varmeta.b0), std::ios::beg);
   std::vector<T> vardata(varmeta.nvar, 0);
   binary_into_buffer<T>(file, vardata);
 

@@ -96,9 +96,32 @@ std::vector<VarMetadata> metadata_from_binary(std::ifstream& file) {
                      gblmeta.charbytes;  // position of 1st byte of variable specific metadata
 
   std::vector<VarMetadata> mdata(0);
+  std::vector<unsigned int> b0_in_file(0);
   for (unsigned int i = 0; i < gblmeta.nvars; ++i) {
     mdata.push_back(VarMetadata(file, pos));
+    b0_in_file.push_back(static_cast<unsigned int>(mdata.back().b0));
     pos += gblmeta.mbytes_pervar;
+  }
+
+  /* Replace each variable's byte offset with one derived in 64 bits.
+  The offsets in the file are 32-bit, so past 4 GiB they wrap and point back into
+  an earlier variable -- see the note on VarMetadata::b0. The writer lays the
+  variables out contiguously starting at d0byte, so the true offset is a running
+  sum; the file's own value must then agree with its low 32 bits, and a file that
+  disagrees is not the layout assumed here and must not be read on a guess. */
+  uint64_t offset = gblmeta.d0byte;
+  for (unsigned int i = 0; i < gblmeta.nvars; ++i) {
+    constexpr uint64_t WRAP = uint64_t{1} << 32;
+    if (b0_in_file.at(i) != offset % WRAP) {
+      throw std::invalid_argument(
+          "variable " + std::to_string(i) + " of the binary file starts at byte " +
+          std::to_string(b0_in_file.at(i)) + ", but accumulating the preceding variables' sizes " +
+          "from the start of the data gives " + std::to_string(offset) +
+          ". The variables are not laid out contiguously in the order the metadata lists them, "
+          "which is the only layout this reader can locate data in.");
+    }
+    mdata.at(i).b0 = offset;
+    offset += uint64_t{mdata.at(i).bsize} * uint64_t{mdata.at(i).nvar};
   }
 
   return mdata;
