@@ -12,6 +12,7 @@
 .DS_Store
 __pycache__
 .clang-format
+.clangd
 _kokkostools
 
 build*/
