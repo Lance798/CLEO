@@ -200,7 +200,13 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
       std::accumulate(per_process_recv_superdrops.begin(), per_process_recv_superdrops.end(), 0);
 
   if (local_superdrops + total_superdrops_to_recv > totsupers.extent(0)) {
-    throw std::runtime_error("must have enough space in supers view to receive superdroplets");
+    throw std::runtime_error(
+        "rank " + std::to_string(my_rank) + " has room for " +
+        std::to_string(totsupers.extent(0)) + " superdroplets but would hold " +
+        std::to_string(local_superdrops + total_superdrops_to_recv) +
+        " after this exchange. The view is sized at initialisation from what the rank starts "
+        "with; raise the capacity factor passed to create_supers so it has more room to take "
+        "superdroplets migrating in from other ranks.");
   }
   if (local_superdrops + total_superdrops_to_recv > totsupers.extent(0)) {
     std::cout << "MAXIMUM NUMBER OF LOCAL SUPERDROPLETS EXCEEDED" << std::endl;

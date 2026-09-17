@@ -21,6 +21,8 @@
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_Profiling_ScopedRegion.hpp>
+#include <algorithm>
+#include <limits>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -180,6 +182,74 @@ SupersInDomain create_supers(const SuperdropInitConds& sdic, const unsigned int 
 }
 
 /**
+ * @brief Build this rank's superdroplets, in a view sized for them rather than for
+ * the whole domain.
+ *
+ * The initial conditions describe the whole domain and say nothing about which rank
+ * owns what, so every rank has to read all of it -- but only on the host, and only
+ * while this runs. What it keeps is a device view holding the superdroplets in this
+ * rank's gridboxes, their indexes translated out of the file's global numbering,
+ * plus room for ones that migrate in later.
+ *
+ * Sizing the view globally instead, which is what happens if you allocate
+ * sdic.get_maxnsupers() on every rank, costs more than the memory: the MPI exchange
+ * stages the occupied part of the view through the host every motion step, and a
+ * view that is comm_size times larger than the superdroplets in it carries that
+ * whole factor into the sort as well.
+ *
+ * capacity_factor is the room for migration, as a multiple of what the rank starts
+ * with. It is capped at the global count, so on a single rank this allocates exactly
+ * what the unsplit version did and the translation is the identity.
+ *
+ * @param sdic The super-droplets' initial conditions.
+ * @param gbxmaps The gridbox maps, for the domain decomposition.
+ * @param capacity_factor View size as a multiple of this rank's initial superdroplets.
+ * @return View of superdrops in device memory.
+ */
+template <typename SuperdropInitConds, GridboxMaps GbxMaps>
+viewd_supers initialise_local_supers(const SuperdropInitConds& sdic, const GbxMaps& gbxmaps,
+                                     const double capacity_factor) {
+  const size_t ntotsupers = sdic.get_maxnsupers();
+
+  auto h_supers = Kokkos::View<Superdrop *, HostSpace>("h_supers", ntotsupers);
+  const GenSuperdrop gen(sdic);
+  Kokkos::parallel_for("initialise_supers_on_host", Kokkos::RangePolicy<HostSpace>(0, ntotsupers),
+                       [=](const size_t kk) { h_supers(kk) = gen(kk); });
+
+  /* Keep the superdroplets in this rank's gridboxes, compacted to the front. A
+  droplet whose global index is not in this partition is simply dropped -- another
+  rank is keeping it. */
+  const auto &decomposition = gbxmaps.get_domain_decomposition();
+  size_t n_local = 0;
+  for (size_t kk = 0; kk < ntotsupers; ++kk) {
+    const auto global_index = h_supers(kk).get_sdgbxindex();
+    if (global_index == LIMITVALUES::oob_gbxindex) continue;
+
+    const auto local_index = decomposition.global_to_local_gridbox_index(global_index);
+    if (local_index < 0) continue;
+
+    h_supers(n_local) = h_supers(kk);
+    h_supers(n_local).set_sdgbxindex(static_cast<unsigned int>(local_index));
+    ++n_local;
+  }
+
+  const auto wanted = static_cast<size_t>(static_cast<double>(n_local) * capacity_factor);
+  const size_t capacity = std::min(ntotsupers, std::max(n_local, wanted));
+  for (size_t kk = n_local; kk < capacity; ++kk) {
+    h_supers(kk).set_sdgbxindex(LIMITVALUES::oob_gbxindex);
+  }
+
+  auto totsupers =
+      viewd_supers(Kokkos::view_alloc("totsupers", Kokkos::WithoutInitializing), capacity);
+  Kokkos::deep_copy(totsupers, Kokkos::subview(h_supers, Kokkos::make_pair(size_t{0}, capacity)));
+
+  std::cout << "rank holds " << n_local << " of " << ntotsupers << " superdroplets; view sized "
+            << capacity << " (" << capacity_factor << "x) for migration\n";
+
+  return totsupers;
+}
+
+/**
  * @brief As above, but taking the gridbox maps so the superdroplets' gridbox
  * indexes can be converted from the global numbering used by the initial
  * conditions to this rank's local one first.
@@ -189,14 +259,12 @@ SupersInDomain create_supers(const SuperdropInitConds& sdic, const unsigned int 
  * local one and silently keeps the wrong droplets. See localise_sdgbxindexes.
  */
 template <typename SuperdropInitConds, GridboxMaps GbxMaps>
-SupersInDomain create_supers(const SuperdropInitConds& sdic, const GbxMaps& gbxmaps) {
+SupersInDomain create_supers(const SuperdropInitConds& sdic, const GbxMaps& gbxmaps,
+                             const double capacity_factor = 1.5) {
   Kokkos::Profiling::ScopedRegion region("init_supers");
 
   std::cout << "\n--- create superdrops ---\ninitialising\n";
-  auto totsupers = initialise_supers(sdic);
-
-  std::cout << "localising superdrop gridbox indexes\n";
-  localise_sdgbxindexes(totsupers, gbxmaps);
+  auto totsupers = initialise_local_supers(sdic, gbxmaps, capacity_factor);
 
   std::cout << "sorting and finding superdrops in domain\n";
   auto allsupers = SupersInDomain(totsupers, gbxmaps.get_local_ngridboxes_hostcopy());
