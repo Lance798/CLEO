@@ -100,7 +100,16 @@ struct MonitorPrecipitation {
     const auto lowerlim = gbxmaps.coord3bounds(gbxindex).first;
     if (drop.get_coord3() < lowerlim) {
       const auto ii = team_member.league_rank();
-      const auto gbxarea = gbxmaps.get_gbxarea(gbxindex);
+      /* Derived from the gridbox bounds rather than read from gbxmaps.get_gbxarea().
+      This runs on the device, and to_areas is a HostSpace UnorderedMap (there is no
+      device-space double map in CLEO), so get_gbxarea would have the GPU walk a hash
+      table through host pointers: find() returns an invalid index and value_at() then
+      reads out of bounds. coord1bounds/coord2bounds are KOKKOS_INLINE_FUNCTION over
+      device-resident maps and carry the same information -- GbxBoundsFromBinary::gbxarea
+      is itself defined as exactly this product. */
+      const auto xbounds = gbxmaps.coord1bounds(gbxindex);
+      const auto ybounds = gbxmaps.coord2bounds(gbxindex);
+      const auto gbxarea = (xbounds.second - xbounds.first) * (ybounds.second - ybounds.first);
       const auto m = drop.condensate_mass() * drop.get_xi() / dlc::Rho_l / gbxarea;
       Kokkos::atomic_add(&d_data(ii), m);
     }
