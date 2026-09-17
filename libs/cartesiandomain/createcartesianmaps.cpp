@@ -71,6 +71,28 @@ CartesianMaps create_cartesian_maps(const size_t ngbxs, const unsigned int nspac
   return gbxmaps;
 }
 
+CartesianMaps create_cartesian_maps(const size_t ngbxs, const unsigned int nspacedims,
+                                    const std::filesystem::path grid_filename,
+                                    const SuppliedDecomposition& supplied) {
+  std::cout << "\n--- create cartesian gridbox maps (supplied decomposition) ---\n";
+
+  const auto gfb = GbxBoundsFromBinary(ngbxs, nspacedims, grid_filename);
+
+  auto gbxmaps = CartesianMaps();
+
+  gbxmaps.create_decomposition(gfb.ndims, gfb, supplied);
+  set_cartesian_maps(nspacedims, gfb, gbxmaps);
+
+  set_maps_ndims(gfb.ndims, gbxmaps);
+
+  check_ngridboxes_matches_ndims(gbxmaps, gbxmaps.get_total_global_ngridboxes());
+  check_ngridboxes_matches_maps(gbxmaps, gbxmaps.get_local_ngridboxes_hostcopy());
+
+  std::cout << "--- create cartesian gridbox maps: success ---\n";
+
+  return gbxmaps;
+}
+
 void check_ngridboxes_matches_maps(const CartesianMaps& gbxmaps, const size_t ngbxs) {
   const auto ngbxs_from_maps = gbxmaps.maps_size();
   if (ngbxs_from_maps != ngbxs + 1) {

@@ -51,4 +51,12 @@ from the gridfile 'grid_filename' */
 CartesianMaps create_cartesian_maps(const size_t ngbxs, const unsigned int nspacedims,
                                     const std::filesystem::path grid_filename);
 
+/* as above, but with the domain decomposition supplied by the caller rather than
+chosen by CLEO. Use this when CLEO is embedded in a model that has already
+decomposed the same domain: the two must agree gridbox for gridbox, and CLEO
+cannot rediscover a rank ordering the host got from MPI_Cart_create. */
+CartesianMaps create_cartesian_maps(const size_t ngbxs, const unsigned int nspacedims,
+                                    const std::filesystem::path grid_filename,
+                                    const SuppliedDecomposition& supplied);
+
 #endif  // LIBS_CARTESIANDOMAIN_CREATECARTESIANMAPS_HPP_

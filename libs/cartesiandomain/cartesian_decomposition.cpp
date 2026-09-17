@@ -82,12 +82,22 @@ void CartesianDecomposition::set_dimensions_bound_behavior(std::array<size_t, 3>
 }
 
 int CartesianDecomposition::get_partition_index_from_slice(std::array<int, 3> slice_indices) const {
+  // A supplied decomposition carries its own rank ordering, so the arithmetic
+  // below does not describe it. The tables are empty for a decomposition CLEO
+  // computed itself, which keeps the original behaviour exactly.
+  if (!rank_of_slice.empty()) {
+    const auto found = rank_of_slice.find(slice_indices);
+    return found == rank_of_slice.end() ? -1 : found->second;
+  }
+
   return slice_indices[0] * (decomposition[1] * decomposition[2]) +
          slice_indices[1] * decomposition[2] + slice_indices[2];
 }
 
 std::array<int, 3> CartesianDecomposition::get_slice_indices_from_partition(
     int partition_index) const {
+  if (!slice_of_rank.empty()) return slice_of_rank.at(partition_index);
+
   return {static_cast<int>(partition_index / (decomposition[1] * decomposition[2])),
           static_cast<int>((partition_index / decomposition[2]) % decomposition[1]),
           static_cast<int>(partition_index % decomposition[2])};
@@ -106,6 +116,57 @@ bool CartesianDecomposition::check_indices_inside_partition(std::array<size_t, 3
   return inside;
 }
 
+/* Copies the host containers this function needs into device-resident members.
+ * See the comment on d_gridbox_bounds in the header for why. */
+void CartesianDecomposition::build_device_mirror() {
+  const auto& sizes = partition_sizes[my_rank];
+  for (int dimension = 0; dimension < 3; dimension++)
+    d_local_partition_size[dimension] = sizes[dimension];
+
+  size_t total = 0;
+  for (int dimension = 0; dimension < 3; dimension++) {
+    d_gridbox_bounds_begin[dimension] = total;
+    total += gridbox_bounds[dimension].size();
+  }
+  d_gridbox_bounds = Kokkos::View<double *, Kokkos::SharedSpace>("d_gridbox_bounds", total);
+  auto h_gridbox_bounds = Kokkos::create_mirror_view(d_gridbox_bounds);
+  for (int dimension = 0; dimension < 3; dimension++)
+    for (size_t i = 0; i < gridbox_bounds[dimension].size(); i++)
+      h_gridbox_bounds(d_gridbox_bounds_begin[dimension] + i) = gridbox_bounds[dimension][i];
+  Kokkos::deep_copy(d_gridbox_bounds, h_gridbox_bounds);
+
+  for (int slot = 0; slot < 27; slot++) d_neighbour_of_direction[slot] = -1;
+  for (const auto& entry : neighboring_processes) {
+    const auto& direction = entry.first;
+    d_neighbour_of_direction[(direction[0] + 1) * 9 + (direction[1] + 1) * 3 +
+                             (direction[2] + 1)] = entry.second;
+  }
+}
+
+/* Same binary search as the free function below, over the flattened bounds. */
+KOKKOS_FUNCTION
+int CartesianDecomposition::bounding_gridbox_in_dimension(const double coordinate,
+                                                          const int dimension) const {
+  const auto begin = d_gridbox_bounds_begin[dimension];
+  int left = 0;
+  int right = static_cast<int>(d_local_partition_size[dimension]) - 1;
+  while (left <= right) {
+    const int mid = (left + (right - left) / 2);
+    if ((coordinate >= d_gridbox_bounds(begin + mid)) &&
+        (coordinate < d_gridbox_bounds(begin + mid + 1))) {
+      return mid;
+    }
+    if (coordinate >= d_gridbox_bounds(begin + mid + 1)) {
+      left = mid + 1;
+    } else if (coordinate < d_gridbox_bounds(begin + mid)) {
+      right = mid;
+    }
+  }
+  // If target is not found
+  return -1;
+}
+
+KOKKOS_FUNCTION
 unsigned int CartesianDecomposition::get_local_bounding_gridbox_index(
     std::array<double, 3>& coordinates) const {
   // Spatial index coordinate of gridbox in each dimension given the superdroplet coordinates
@@ -113,12 +174,11 @@ unsigned int CartesianDecomposition::get_local_bounding_gridbox_index(
 
   std::array<int, 3> external_direction = {0, 0, 0};
   bool local_coordinate = true;
-  auto partition_size = partition_sizes[my_rank];
 
   for (auto dimension : {0, 1, 2}) {
     // Tests whether the coordinate in that dimension is smaller than the
     // beginning of the partition
-    if (coordinates[dimension] < gridbox_bounds[dimension].front()) {
+    if (coordinates[dimension] < d_gridbox_bounds(d_gridbox_bounds_begin[dimension])) {
       // If the dimension behavior is finite and the coordinate is smaller than
       // the beginning of the domain return the out_of_bounds value
       if (dimension_bound_behavior[dimension] == 0 &&
@@ -130,7 +190,9 @@ unsigned int CartesianDecomposition::get_local_bounding_gridbox_index(
       local_coordinate = false;
 
       // Tests whether the coordinate for that dimension is larger than the end of the partition
-    } else if (coordinates[dimension] > gridbox_bounds[dimension].back()) {
+    } else if (coordinates[dimension] >
+               d_gridbox_bounds(d_gridbox_bounds_begin[dimension] +
+                                d_local_partition_size[dimension])) {
       // If the dimension behavior is finite and the coordinate is larger than
       // the end of the domain return the out_of_bounds value
 
@@ -146,17 +208,19 @@ unsigned int CartesianDecomposition::get_local_bounding_gridbox_index(
       // partition in that dimension
     } else if (local_coordinate) {
       bounding_gridbox_index_coordinates[dimension] =
-          binary_search(coordinates, dimension, partition_size, gridbox_bounds);
+          bounding_gridbox_in_dimension(coordinates[dimension], dimension);
     }
   }
   // If the coordinate is inside of the partition in all dimensions, returns the
   // index of its bounding gridbox
   if (local_coordinate) {
-    return get_index_from_coordinates({get_local_partition_size()[0], get_local_partition_size()[1],
-                                       get_local_partition_size()[2]},
-                                      bounding_gridbox_index_coordinates[0],
-                                      bounding_gridbox_index_coordinates[1],
-                                      bounding_gridbox_index_coordinates[2]);
+    // Inlined get_index_from_coordinates: that overload takes a std::vector, and
+    // building the temporary would be a heap allocation inside a kernel.
+    return static_cast<unsigned int>(
+        bounding_gridbox_index_coordinates[0] +
+        d_local_partition_size[0] * (bounding_gridbox_index_coordinates[1] +
+                                     d_local_partition_size[1] *
+                                         bounding_gridbox_index_coordinates[2]));
 
     // Otherwise, the coordinate is outside of the partition
   } else {
@@ -175,12 +239,15 @@ unsigned int CartesianDecomposition::get_local_bounding_gridbox_index(
 
     // If the coordinates have been corrected but the target partition is local
     // then get the local bounding gridbox
-    if (corrected && neighboring_processes.at(external_direction) == my_rank)
-      return get_local_bounding_gridbox_index(coordinates);
+    const auto neighbour =
+        d_neighbour_of_direction[(external_direction[0] + 1) * 9 +
+                                 (external_direction[1] + 1) * 3 + (external_direction[2] + 1)];
+
+    if (corrected && neighbour == my_rank) return get_local_bounding_gridbox_index(coordinates);
 
     // If the coordinate is outside of the local partition, encode in the return
     // value which process contains it
-    return (LIMITVALUES::oob_gbxindex - 1) - neighboring_processes.at(external_direction);
+    return (LIMITVALUES::oob_gbxindex - 1) - neighbour;
   }
 }
 
@@ -237,6 +304,106 @@ int CartesianDecomposition::local_to_global_gridbox_index(size_t local_gridbox_i
                                     local_coordinates[2] + partition_origin[2]);
 }
 
+// Assigns each rank a Cartesian slice index per dimension, taken from where its
+// partition origin sorts among the distinct origins in that dimension. Deriving
+// the slices from the origins rather than from a rank formula is what lets the
+// caller number its ranks however it likes.
+void CartesianDecomposition::index_partitions_into_slices() {
+  const auto nprocs = partition_origins.size();
+  slice_of_rank.assign(nprocs, {0, 0, 0});
+  rank_of_slice.clear();
+
+  for (int dimension = 0; dimension < 3; dimension++) {
+    std::vector<size_t> distinct;
+    distinct.reserve(nprocs);
+    for (const auto& origin : partition_origins) distinct.push_back(origin[dimension]);
+    std::sort(distinct.begin(), distinct.end());
+    distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+
+    if (distinct.size() != decomposition[dimension])
+      throw std::runtime_error(
+          "supplied decomposition: dimension " + std::to_string(dimension) + " has " +
+          std::to_string(distinct.size()) + " distinct partition origins but the decomposition " +
+          "says it is cut into " + std::to_string(decomposition[dimension]) + " parts");
+
+    for (size_t process = 0; process < nprocs; process++) {
+      const auto position = std::lower_bound(distinct.begin(), distinct.end(),
+                                             partition_origins[process][dimension]);
+      slice_of_rank[process][dimension] = static_cast<int>(position - distinct.begin());
+    }
+  }
+
+  for (size_t process = 0; process < nprocs; process++)
+    rank_of_slice[slice_of_rank[process]] = static_cast<int>(process);
+
+  if (rank_of_slice.size() != nprocs)
+    throw std::runtime_error(
+        "supplied decomposition: two processes occupy the same slice, so the partitions do not "
+        "form a regular grid");
+}
+
+// Creation of the decomposition from one the caller already computed
+bool CartesianDecomposition::create(std::vector<size_t> ndims, GbxBoundsFromBinary gfb,
+                                    const SuppliedDecomposition& supplied) {
+  this->ndims = ndims;
+  const int comm_size = init_communicator::get_comm_size();
+  my_rank = init_communicator::get_comm_rank();
+
+  if (supplied.origins.size() != static_cast<size_t>(comm_size) ||
+      supplied.sizes.size() != static_cast<size_t>(comm_size))
+    throw std::runtime_error("supplied decomposition describes " +
+                             std::to_string(supplied.origins.size()) + " partitions but there are " +
+                             std::to_string(comm_size) + " processes");
+
+  const auto product = supplied.decomposition[0] * supplied.decomposition[1] *
+                       supplied.decomposition[2];
+  if (product != static_cast<size_t>(comm_size))
+    throw std::runtime_error("supplied decomposition cuts the domain into " +
+                             std::to_string(product) + " parts for " + std::to_string(comm_size) +
+                             " processes");
+
+  // The partitions have to tile the domain: no gaps and no overlaps. Comparing
+  // the total gridbox count catches both at once, and a mismatch here is far
+  // easier to read than the out-of-bounds superdroplet it would become later.
+  size_t covered = 0;
+  for (int process = 0; process < comm_size; process++) {
+    const auto& size = supplied.sizes[process];
+    const auto& origin = supplied.origins[process];
+    for (int dimension = 0; dimension < 3; dimension++)
+      if (origin[dimension] + size[dimension] > ndims[dimension])
+        throw std::runtime_error("supplied decomposition: partition of process " +
+                                 std::to_string(process) + " runs past the end of dimension " +
+                                 std::to_string(dimension));
+    covered += size[0] * size[1] * size[2];
+  }
+  if (covered != ndims[0] * ndims[1] * ndims[2])
+    throw std::runtime_error("supplied decomposition covers " + std::to_string(covered) +
+                             " gridboxes but the domain has " +
+                             std::to_string(ndims[0] * ndims[1] * ndims[2]));
+
+  const auto gbx_idx = gfb.gbxidxs.back();
+  domain_bounds[0][0] = gfb.get_coord3gbxbounds(0).first;
+  domain_bounds[0][1] = gfb.get_coord1gbxbounds(0).first;
+  domain_bounds[0][2] = gfb.get_coord2gbxbounds(0).first;
+  domain_bounds[1][0] = gfb.get_coord3gbxbounds(gbx_idx).second;
+  domain_bounds[1][1] = gfb.get_coord1gbxbounds(gbx_idx).second;
+  domain_bounds[1][2] = gfb.get_coord2gbxbounds(gbx_idx).second;
+
+  decomposition = supplied.decomposition;
+  partition_origins = supplied.origins;
+  partition_sizes = supplied.sizes;
+  total_local_gridboxes =
+      partition_sizes[my_rank][0] * partition_sizes[my_rank][1] * partition_sizes[my_rank][2];
+
+  index_partitions_into_slices();
+  set_gridbox_bounds(gfb);
+  calculate_partition_coordinates();
+  calculate_neighboring_processes();
+  build_device_mirror();
+
+  return true;
+}
+
 // Main subroutine for the creation of the decomposition
 bool CartesianDecomposition::create(std::vector<size_t> ndims, GbxBoundsFromBinary gfb) {
   this->ndims = ndims;
@@ -268,6 +435,7 @@ bool CartesianDecomposition::create(std::vector<size_t> ndims, GbxBoundsFromBina
     set_gridbox_bounds(gfb);
     calculate_partition_coordinates();
     calculate_neighboring_processes();
+    build_device_mirror();
 
     return true;
   }
@@ -319,6 +487,7 @@ bool CartesianDecomposition::create(std::vector<size_t> ndims, GbxBoundsFromBina
   set_gridbox_bounds(gfb);
   calculate_partition_coordinates();
   calculate_neighboring_processes();
+  build_device_mirror();
   return true;
 }
 

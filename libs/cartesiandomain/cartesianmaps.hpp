@@ -273,6 +273,17 @@ struct CartesianMaps {
     }
   }
 
+  /* as above, but using a decomposition the caller already computed (e.g. the
+  host model's own, when CLEO is coupled to one). See SuppliedDecomposition. */
+  void create_decomposition(std::vector<size_t> global_ndims, GbxBoundsFromBinary gfb,
+                            const SuppliedDecomposition& supplied) {
+    domain_decomposition.create(global_ndims, gfb, supplied);
+    if (domain_decomposition.get_total_local_gridboxes() <
+        domain_decomposition.get_total_global_gridboxes()) {
+      is_decomp = true;
+    }
+  }
+
   const CartesianDecomposition& get_domain_decomposition() const { return domain_decomposition; }
 
   size_t get_total_global_ngridboxes() const {
