@@ -65,7 +65,8 @@ which move to/from gridboxes on different nodes.
 */
 template <GridboxMaps GbxMaps>
 viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
-                             viewd_supers totsupers) {
+                             viewd_supers totsupers_cuda) {
+  auto totsupers = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), totsupers_cuda);
   int comm_size, my_rank;
   comm_size = init_communicator::get_comm_size();
   my_rank = init_communicator::get_comm_rank();
@@ -96,22 +97,42 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
   size_t superdrop_index = totsupers.extent(0) - 1;
   Superdrop& drop = totsupers(superdrop_index);
 
-  // Go through superdrops from back to front and find how many should be sent and their indices
+  /* Go through superdrops from back to front and find how many should be sent and
+  their indices.
+
+  superdrop_index is unsigned and the loop used to decrement it with no floor, so
+  a view in which NO superdroplet is local walked off the front, wrapped to
+  SIZE_MAX and kept reading wild memory: most garbage passes the >= ngbxs test so
+  the loop never ends, and the occasional value that looks like a send encodes a
+  target_process far outside [0, comm_size), which then corrupts the heap through
+  per_process_send_superdrops[]. The symptom is a livelock with jemalloc churn and
+  caught SIGSEGVs, nowhere near the actual cause. */
   const auto ngbxs = d_gbxs.extent(0);
   while (drop.get_sdgbxindex() >= ngbxs) {
     if (drop.get_sdgbxindex() < LIMITVALUES::oob_gbxindex) {
       int target_process = (LIMITVALUES::oob_gbxindex - drop.get_sdgbxindex()) - 1;
+      if (target_process < 0 || target_process >= comm_size) {
+        throw std::runtime_error("superdroplet encodes target process " +
+                                 std::to_string(target_process) + ", outside [0, " +
+                                 std::to_string(comm_size) + ")");
+      }
       per_process_send_superdrops[target_process]++;
       superdrops_indices_per_process[target_process].push_back(superdrop_index);
       total_superdrops_to_send++;
     }
+    if (superdrop_index == 0) {
+      // Every superdroplet in the view is non-local. Legitimate only if the rank
+      // owns none of them; anything else is a bug upstream in the motion step.
+      local_superdrops = 0;
+      break;
+    }
     drop = totsupers(--superdrop_index);
   }
-  local_superdrops = superdrop_index + 1;
+  if (superdrop_index != 0 || drop.get_sdgbxindex() < ngbxs) local_superdrops = superdrop_index + 1;
 
   // Share how many superdrops each process will send and receive to/from the others
   MPI_Alltoall(per_process_send_superdrops.data(), 1, MPI_INT, per_process_recv_superdrops.data(),
-               1, MPI_INT, MPI_COMM_WORLD);
+               1, MPI_INT, init_communicator::get_communicator());
   total_superdrops_to_recv =
       std::accumulate(per_process_recv_superdrops.begin(), per_process_recv_superdrops.end(), 0);
 
@@ -120,7 +141,9 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
   }
   if (local_superdrops + total_superdrops_to_recv > totsupers.extent(0)) {
     std::cout << "MAXIMUM NUMBER OF LOCAL SUPERDROPLETS EXCEEDED" << std::endl;
-    return totsupers;
+    viewd_supers device_supers("device_supers_name", totsupers.extent(0));
+    Kokkos::deep_copy(device_supers, totsupers);
+    return device_supers;
   }
 
   // Knowing how many superdroplets will be sent and received, allocate
@@ -172,30 +195,30 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
       // Checks whether something should be sent to process i
       if (per_process_send_superdrops[i] > 0) {
         MPI_Isend(superdrops_uint_send_data.data() + uint_send_displacements[i],
-                  uint_send_counts[i], MPI_UNSIGNED, i, 0, MPI_COMM_WORLD,
+                  uint_send_counts[i], MPI_UNSIGNED, i, 0, init_communicator::get_communicator(),
                   exchange_requests.data() + i);
 
         MPI_Isend(superdrops_uint64_send_data.data() + uint64_send_displacements[i],
-                  per_process_send_superdrops[i], MPI_UNSIGNED_LONG, i, 1, MPI_COMM_WORLD,
+                  per_process_send_superdrops[i], MPI_UNSIGNED_LONG, i, 1, init_communicator::get_communicator(),
                   exchange_requests.data() + comm_size + i);
 
         MPI_Isend(superdrops_double_send_data.data() + double_send_displacements[i],
-                  double_send_counts[i], MPI_DOUBLE, i, 2, MPI_COMM_WORLD,
+                  double_send_counts[i], MPI_DOUBLE, i, 2, init_communicator::get_communicator(),
                   exchange_requests.data() + comm_size * 2 + i);
       }
 
       // Checks whether something should be received from process i
       if (per_process_recv_superdrops[i] > 0) {
         MPI_Irecv(superdrops_uint_recv_data.data() + uint_recv_displacements[i],
-                  uint_recv_counts[i], MPI_UNSIGNED, i, 0, MPI_COMM_WORLD,
+                  uint_recv_counts[i], MPI_UNSIGNED, i, 0, init_communicator::get_communicator(),
                   exchange_requests.data() + (comm_size * 3) + i);
 
         MPI_Irecv(superdrops_uint64_recv_data.data() + uint64_recv_displacements[i],
-                  per_process_recv_superdrops[i], MPI_UNSIGNED_LONG, i, 1, MPI_COMM_WORLD,
+                  per_process_recv_superdrops[i], MPI_UNSIGNED_LONG, i, 1, init_communicator::get_communicator(),
                   exchange_requests.data() + (comm_size * 4) + i);
 
         MPI_Irecv(superdrops_double_recv_data.data() + double_recv_displacements[i],
-                  double_recv_counts[i], MPI_DOUBLE, i, 2, MPI_COMM_WORLD,
+                  double_recv_counts[i], MPI_DOUBLE, i, 2, init_communicator::get_communicator(),
                   exchange_requests.data() + (comm_size * 5) + i);
       }
     }
@@ -235,7 +258,9 @@ viewd_supers sendrecv_supers(const GbxMaps& gbxmaps, const viewd_gbx d_gbxs,
   for (unsigned int i = local_superdrops + total_superdrops_to_recv; i < totsupers.extent(0); i++)
     totsupers(i).set_sdgbxindex(LIMITVALUES::oob_gbxindex);
 
-  return totsupers;
+  viewd_supers device_supers("device_supers_name", totsupers.extent(0));
+  Kokkos::deep_copy(device_supers, totsupers);
+  return device_supers;
 }
 
 #endif  // LIBS_CARTESIANDOMAIN_MOVEMENT_CARTESIAN_TRANSPORT_ACROSS_DOMAIN_HPP_

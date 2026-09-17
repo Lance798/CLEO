@@ -18,6 +18,7 @@
  */
 
 #include "./cartesian_transport_across_domain.hpp"
+#include <cstdlib>
 
 /* (re)sorting supers based on their gbxindexes as step to 'move' superdroplets across the domain.
 May also include MPI communication with moves superdroplets away from/into a node's domain
