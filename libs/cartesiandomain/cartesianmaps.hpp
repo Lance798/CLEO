@@ -286,6 +286,14 @@ struct CartesianMaps {
 
   const CartesianDecomposition& get_domain_decomposition() const { return domain_decomposition; }
 
+  /* Sets whether each dimension is periodic (1) or finite (0) on THIS instance's
+  decomposition. get_domain_decomposition() hands back a const reference, so
+  `auto d = gbxmaps.get_domain_decomposition()` deduces a value and any setter
+  called on it writes to a copy that is then discarded. */
+  void set_dimensions_bound_behavior(std::array<size_t, 3> behaviors) {
+    domain_decomposition.set_dimensions_bound_behavior(behaviors);
+  }
+
   size_t get_total_global_ngridboxes() const {
     return domain_decomposition.get_total_global_gridboxes();
   }

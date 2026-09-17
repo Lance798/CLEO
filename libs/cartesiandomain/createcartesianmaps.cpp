@@ -170,10 +170,14 @@ void set_cartesian_maps(const unsigned int nspacedims, const GbxBoundsFromBinary
 
   const auto ndims(gfb.ndims);
 
-  auto domain_decomposition = gbxmaps.get_domain_decomposition();
+  /* On gbxmaps, not on a local copy: coord3 must be finite so a superdroplet
+  leaving the top or bottom of the domain is reported out of bounds, while
+  coord1/coord2 wrap. */
+  gbxmaps.set_dimensions_bound_behavior({0, 1, 1});
+
+  const auto& domain_decomposition = gbxmaps.get_domain_decomposition();
   auto partition_origin = domain_decomposition.get_local_partition_origin();
   auto partition_size = domain_decomposition.get_local_partition_size();
-  domain_decomposition.set_dimensions_bound_behavior({0, 1, 1});
 
   const auto sz = gbxmaps.get_local_ngridboxes_hostcopy() + 1;  // +1 for oob_gbxindex key
 
@@ -289,10 +293,14 @@ void set_null_cartesian_maps(const unsigned int nspacedims, const GbxBoundsFromB
 
   const auto ndims(gfb.ndims);
 
-  auto domain_decomposition = gbxmaps.get_domain_decomposition();
+  /* On gbxmaps, not on a local copy: coord3 must be finite so a superdroplet
+  leaving the top or bottom of the domain is reported out of bounds, while
+  coord1/coord2 wrap. */
+  gbxmaps.set_dimensions_bound_behavior({0, 1, 1});
+
+  const auto& domain_decomposition = gbxmaps.get_domain_decomposition();
   auto partition_origin = domain_decomposition.get_local_partition_origin();
   auto partition_size = domain_decomposition.get_local_partition_size();
-  domain_decomposition.set_dimensions_bound_behavior({0, 1, 1});
 
   const auto sz = gbxmaps.get_local_ngridboxes_hostcopy() + 1;  // +1 for oob_gbxindex key
   const auto h_nullbounds = kokkos_pairmap::HostMirror(sz);

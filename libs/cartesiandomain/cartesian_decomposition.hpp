@@ -79,8 +79,13 @@ class CartesianDecomposition {
   // First Index 1 : Upper bounds in z, x, y directions
   std::array<std::array<double, 3>, 2> domain_bounds;
 
-  // Behavior of each dimension, being either periodic or finite
-  std::array<size_t, 3> dimension_bound_behavior;
+  /* Behavior of each dimension, being either periodic (1) or finite (0).
+  Default-initialised here because the default constructor leaves it alone, and
+  get_local_bounding_gridbox_index tests it to decide whether a coordinate past
+  the domain edge is out of bounds or wraps: reading indeterminate values there
+  silently keeps superdroplets that should have left the domain. All-finite is
+  the safe default -- it reports a departure rather than inventing a wrap. */
+  std::array<size_t, 3> dimension_bound_behavior = {0, 0, 0};
 
   // Which process neighbors the current one in each direction
   // (it can also be the same as the local one)
